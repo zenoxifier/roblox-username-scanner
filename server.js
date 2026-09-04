@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 10000;
 // Render instances have ephemeral memory, so this is intentionally basic.
 const requests = new Map();
 const WINDOW_MS = 60 * 1000;
-const MAX_REQUESTS_PER_IP = 30;
+const MAX_REQUESTS_PER_IP = 500;
 
 function rateLimit(req, res, next) {
     const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
