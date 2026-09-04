@@ -8,32 +8,31 @@ app.use(express.json({
 
 const PORT = process.env.PORT || 10000;
 
-
-/* =========================
-   ROBLOX API SETTINGS
-========================= */
-
 const ROBLOX_URL =
     "https://users.roblox.com/v1/usernames/users";
 
 const MAX_BATCH = 50;
 
-const MAX_RETRIES = 4;
+const MAX_RETRIES = 5;
 
 
-/* =========================
-   BACKEND RATE LIMIT
-========================= */
+/* =========================================
+   RATE LIMIT
+========================================= */
 
 const requests = new Map();
 
 const WINDOW_MS = 60 * 1000;
+
 const MAX_REQUESTS_PER_IP = 300;
+
 
 function rateLimit(req, res, next) {
 
     const ip =
-        req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+        req.headers["x-forwarded-for"]
+            ?.split(",")[0]
+            ?.trim() ||
         req.socket.remoteAddress ||
         "unknown";
 
@@ -41,7 +40,10 @@ function rateLimit(req, res, next) {
 
     let entry = requests.get(ip);
 
-    if (!entry || now - entry.start > WINDOW_MS) {
+    if (
+        !entry ||
+        now - entry.start > WINDOW_MS
+    ) {
 
         entry = {
             start: now,
@@ -54,11 +56,18 @@ function rateLimit(req, res, next) {
 
     requests.set(ip, entry);
 
-    if (entry.count > MAX_REQUESTS_PER_IP) {
+    if (
+        entry.count >
+        MAX_REQUESTS_PER_IP
+    ) {
 
         return res.status(429).json({
+
             success: false,
-            error: "Backend rate limit reached."
+
+            error:
+                "Backend rate limit reached."
+
         });
 
     }
@@ -67,65 +76,89 @@ function rateLimit(req, res, next) {
 }
 
 
-/* =========================
+/* =========================================
    HOME
-========================= */
+========================================= */
 
 app.get("/", (req, res) => {
 
     res.json({
+
         success: true,
-        service: "Roblox Username Scanner Backend",
+
+        service:
+            "Roblox Username Scanner Backend",
+
         status: "online"
+
     });
 
 });
 
 
-/* =========================
+/* =========================================
    HEALTH
-========================= */
+========================================= */
 
 app.get("/health", (req, res) => {
 
     res.json({
+
         ok: true
+
     });
 
 });
 
 
-/* =========================
-   ROBLOX CHECK
-========================= */
+/* =========================================
+   ROBLOX API
+========================================= */
 
 async function checkRoblox(usernames) {
 
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    for (
+        let attempt = 0;
+        attempt < MAX_RETRIES;
+        attempt++
+    ) {
 
         try {
 
-            const response = await fetch(
-                ROBLOX_URL,
-                {
-                    method: "POST",
+            const response =
+                await fetch(
+                    ROBLOX_URL,
+                    {
 
-                    headers: {
-                        "Content-Type": "application/json",
-                        "Accept": "application/json"
-                    },
+                        method: "POST",
 
-                    body: JSON.stringify({
-                        usernames: usernames,
-                        excludeBannedUsers: false
-                    })
-                }
-            );
+                        headers: {
+
+                            "Content-Type":
+                                "application/json",
+
+                            "Accept":
+                                "application/json"
+
+                        },
+
+                        body: JSON.stringify({
+
+                            usernames:
+                                usernames,
+
+                            excludeBannedUsers:
+                                false
+
+                        })
+
+                    }
+                );
 
 
-            /* =========================
+            /* =================================
                SUCCESS
-            ========================= */
+            ================================= */
 
             if (response.ok) {
 
@@ -134,29 +167,61 @@ async function checkRoblox(usernames) {
             }
 
 
-            /* =========================
+            /* =================================
                RATE LIMITED
-            ========================= */
+            ================================= */
 
-            if (response.status === 429) {
+            if (
+                response.status === 429
+            ) {
 
                 const retryAfter =
-                    response.headers.get("retry-after");
+                    response.headers.get(
+                        "retry-after"
+                    );
 
-                let waitTime =
-                    retryAfter
-                        ? Number(retryAfter) * 1000
-                        : Math.min(
-                            1000 * Math.pow(2, attempt),
-                            10000
+                let waitTime;
+
+                if (retryAfter) {
+
+                    const seconds =
+                        Number(retryAfter);
+
+                    if (
+                        Number.isFinite(seconds)
+                    ) {
+
+                        waitTime =
+                            seconds * 1000;
+
+                    }
+
+                }
+
+                if (!waitTime) {
+
+                    waitTime =
+                        Math.min(
+                            1000 *
+                            Math.pow(
+                                2,
+                                attempt
+                            ),
+                            15000
                         );
 
+                }
+
                 console.log(
-                    `Roblox rate limited request. Waiting ${waitTime}ms...`
+                    `Roblox returned 429. Waiting ${waitTime}ms...`
                 );
 
-                await new Promise(resolve =>
-                    setTimeout(resolve, waitTime)
+                await new Promise(
+                    resolve =>
+                        setTimeout(
+                            resolve,
+                            waitTime
+                        )
                 );
 
                 continue;
@@ -164,9 +229,9 @@ async function checkRoblox(usernames) {
             }
 
 
-            /* =========================
-               OTHER ERROR
-            ========================= */
+            /* =================================
+               OTHER ROBLOX ERROR
+            ================================= */
 
             const errorText =
                 await response.text();
@@ -178,28 +243,42 @@ async function checkRoblox(usernames) {
             );
 
             throw new Error(
-                `Roblox API returned ${response.status}`
+                `Roblox API returned ${response.status}: ${errorText}`
             );
 
-        } catch (error) {
+        }
+        catch (error) {
 
             console.error(
-                "Roblox request failed:",
+                "Roblox request error:",
                 error.message
             );
 
-            if (attempt === MAX_RETRIES - 1) {
+            if (
+                attempt ===
+                MAX_RETRIES - 1
+            ) {
+
                 throw error;
+
             }
 
             const waitTime =
                 Math.min(
-                    1000 * Math.pow(2, attempt),
-                    10000
+                    1000 *
+                    Math.pow(
+                        2,
+                        attempt
+                    ),
+                    15000
                 );
 
-            await new Promise(resolve =>
-                setTimeout(resolve, waitTime)
+            await new Promise(
+                resolve =>
+                    setTimeout(
+                        resolve,
+                        waitTime
+                    )
             );
 
         }
@@ -213,9 +292,9 @@ async function checkRoblox(usernames) {
 }
 
 
-/* =========================
+/* =========================================
    BATCH CHECK
-========================= */
+========================================= */
 
 app.post(
     "/check-batch",
@@ -228,43 +307,66 @@ app.post(
                 req.body?.usernames;
 
 
-            /* =========================
-               VALIDATE ARRAY
-            ========================= */
+            /* =================================
+               VALIDATE
+            ================================= */
 
-            if (!Array.isArray(usernames)) {
+            if (
+                !Array.isArray(usernames)
+            ) {
 
                 return res.status(400).json({
+
                     success: false,
-                    error: "usernames must be an array."
+
+                    error:
+                        "usernames must be an array."
+
                 });
 
             }
 
 
-            /* =========================
-               CLEAN USERNAMES
-            ========================= */
+            /* =================================
+               CLEAN
+            ================================= */
 
             usernames =
-                [...new Set(
-                    usernames
-                        .map(name =>
-                            String(name).trim()
-                        )
-                        .filter(name =>
-                            /^[A-Za-z][A-Za-z0-9]{2,19}$/
-                                .test(name)
-                        )
-                )]
-                .slice(0, MAX_BATCH);
+                [
+                    ...new Set(
+
+                        usernames
+                            .map(
+                                name =>
+                                    String(name)
+                                        .trim()
+                            )
+
+                            .filter(
+                                name =>
+                                    /^[A-Za-z][A-Za-z0-9]{2,19}$/
+                                        .test(name)
+                            )
+
+                    )
+                ]
+                .slice(
+                    0,
+                    MAX_BATCH
+                );
 
 
-            if (usernames.length === 0) {
+            if (
+                usernames.length === 0
+            ) {
 
                 return res.status(400).json({
+
                     success: false,
-                    error: "No valid usernames."
+
+                    error:
+                        "No valid usernames."
+
                 });
 
             }
@@ -275,29 +377,38 @@ app.post(
             );
 
 
-            /* =========================
-               ASK ROBLOX
-            ========================= */
+            /* =================================
+               CHECK ROBLOX
+            ================================= */
 
             const data =
-                await checkRoblox(usernames);
+                await checkRoblox(
+                    usernames
+                );
 
 
-            /* =========================
-               FIND EXISTING USERS
-            ========================= */
+            /* =================================
+               EXISTING USERS
+            ================================= */
 
             const existing =
                 new Set();
 
-            if (Array.isArray(data.data)) {
 
-                for (const user of data.data) {
+            if (
+                Array.isArray(data.data)
+            ) {
+
+                for (
+                    const user
+                    of data.data
+                ) {
 
                     if (user.name) {
 
                         existing.add(
-                            user.name.toLowerCase()
+                            user.name
+                                .toLowerCase()
                         );
 
                     }
@@ -307,48 +418,49 @@ app.post(
             }
 
 
-            /* =========================
-               BUILD RESULTS
-            ========================= */
+            /* =================================
+               CREATE RESULTS
+            ================================= */
 
             const results =
-                usernames.map(username => {
+                usernames.map(
+                    username => ({
 
-                    return {
-
-                        username: username,
+                        username:
+                            username,
 
                         available:
                             !existing.has(
-                                username.toLowerCase()
+                                username
+                                    .toLowerCase()
                             )
 
-                    };
+                    })
+                );
 
-                });
 
+            /* =================================
+               RESPONSE
+            ================================= */
 
-            /* =========================
-               SEND RESULT
-            ========================= */
-
-            res.json({
+            return res.json({
 
                 success: true,
 
-                results: results
+                results:
+                    results
 
             });
 
-
-        } catch (error) {
+        }
+        catch (error) {
 
             console.error(
                 "Batch error:",
                 error
             );
 
-            res.status(502).json({
+            return res.status(502).json({
 
                 success: false,
 
@@ -364,9 +476,9 @@ app.post(
 );
 
 
-/* =========================
-   SERVER
-========================= */
+/* =========================================
+   START SERVER
+========================================= */
 
 app.listen(
     PORT,
