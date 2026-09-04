@@ -8,17 +8,26 @@ app.use(express.json({
 
 const PORT = process.env.PORT || 10000;
 
-const ROBLOX_URL =
-    "https://users.roblox.com/v1/usernames/users";
+
+/* =========================================================
+   SETTINGS
+========================================================= */
+
+const ROBLOX_VALIDATE_URL =
+    "https://auth.roblox.com/v2/usernames/validate";
 
 const MAX_BATCH = 50;
 
-const MAX_RETRIES = 5;
+// Number of Roblox requests running at the same time.
+// 8 gives us a good balance between speed and rate limits.
+const CONCURRENCY = 8;
+
+const MAX_RETRIES = 3;
 
 
-/* =========================================
-   RATE LIMIT
-========================================= */
+/* =========================================================
+   BACKEND RATE LIMIT
+========================================================= */
 
 const requests = new Map();
 
@@ -76,9 +85,9 @@ function rateLimit(req, res, next) {
 }
 
 
-/* =========================================
+/* =========================================================
    HOME
-========================================= */
+========================================================= */
 
 app.get("/", (req, res) => {
 
@@ -96,9 +105,9 @@ app.get("/", (req, res) => {
 });
 
 
-/* =========================================
+/* =========================================================
    HEALTH
-========================================= */
+========================================================= */
 
 app.get("/health", (req, res) => {
 
@@ -111,11 +120,11 @@ app.get("/health", (req, res) => {
 });
 
 
-/* =========================================
-   ROBLOX API
-========================================= */
+/* =========================================================
+   CHECK ONE USERNAME
+========================================================= */
 
-async function checkRoblox(usernames) {
+async function checkUsername(username) {
 
     for (
         let attempt = 0;
@@ -125,51 +134,69 @@ async function checkRoblox(usernames) {
 
         try {
 
+            const url =
+                ROBLOX_VALIDATE_URL +
+                "?request.username=" +
+                encodeURIComponent(username) +
+                "&request.birthday=2000-01-01" +
+                "&request.context=Signup";
+
+
             const response =
                 await fetch(
-                    ROBLOX_URL,
+                    url,
                     {
-
-                        method: "POST",
+                        method: "GET",
 
                         headers: {
-
-                            "Content-Type":
-                                "application/json",
-
                             "Accept":
                                 "application/json"
-
-                        },
-
-                        body: JSON.stringify({
-
-                            usernames:
-                                usernames,
-
-                            excludeBannedUsers:
-                                false
-
-                        })
-
+                        }
                     }
                 );
 
 
-            /* =================================
+            /* =============================================
                SUCCESS
-            ================================= */
+            ============================================= */
 
             if (response.ok) {
 
-                return await response.json();
+                const data =
+                    await response.json();
+
+                /*
+                    Roblox validation codes:
+
+                    0 = valid and available
+                    1 = username already in use
+                    Other = invalid / filtered / unavailable
+                */
+
+                const code =
+                    Number(data.code);
+
+
+                return {
+
+                    username: username,
+
+                    available:
+                        code === 0,
+
+                    code: code,
+
+                    message:
+                        data.message || ""
+
+                };
 
             }
 
 
-            /* =================================
+            /* =============================================
                RATE LIMITED
-            ================================= */
+            ============================================= */
 
             if (
                 response.status === 429
@@ -180,7 +207,8 @@ async function checkRoblox(usernames) {
                         "retry-after"
                     );
 
-                let waitTime;
+                let waitTime = 2000;
+
 
                 if (retryAfter) {
 
@@ -192,29 +220,33 @@ async function checkRoblox(usernames) {
                     ) {
 
                         waitTime =
-                            seconds * 1000;
+                            Math.max(
+                                seconds * 1000,
+                                1000
+                            );
 
                     }
 
                 }
-
-                if (!waitTime) {
+                else {
 
                     waitTime =
                         Math.min(
-                            1000 *
+                            2000 *
                             Math.pow(
                                 2,
                                 attempt
                             ),
-                            15000
+                            10000
                         );
 
                 }
 
+
                 console.log(
-                    `Roblox returned 429. Waiting ${waitTime}ms...`
+                    `Rate limited: ${username}. Waiting ${waitTime}ms`
                 );
+
 
                 await new Promise(
                     resolve =>
@@ -224,54 +256,73 @@ async function checkRoblox(usernames) {
                         )
                 );
 
+
                 continue;
 
             }
 
 
-            /* =================================
-               OTHER ROBLOX ERROR
-            ================================= */
+            /* =============================================
+               OTHER ERROR
+            ============================================= */
 
-            const errorText =
+            const text =
                 await response.text();
 
+
             console.error(
-                "Roblox API error:",
+                `Roblox error for ${username}:`,
                 response.status,
-                errorText
+                text
             );
 
-            throw new Error(
-                `Roblox API returned ${response.status}: ${errorText}`
-            );
+
+            return {
+
+                username: username,
+
+                available: false,
+
+                error:
+                    `Roblox HTTP ${response.status}`
+
+            };
 
         }
         catch (error) {
 
             console.error(
-                "Roblox request error:",
+                `Request failed for ${username}:`,
                 error.message
             );
+
 
             if (
                 attempt ===
                 MAX_RETRIES - 1
             ) {
 
-                throw error;
+                return {
+
+                    username: username,
+
+                    available: false,
+
+                    error:
+                        error.message
+
+                };
 
             }
 
+
             const waitTime =
-                Math.min(
-                    1000 *
-                    Math.pow(
-                        2,
-                        attempt
-                    ),
-                    15000
+                1000 *
+                Math.pow(
+                    2,
+                    attempt
                 );
+
 
             await new Promise(
                 resolve =>
@@ -285,16 +336,95 @@ async function checkRoblox(usernames) {
 
     }
 
-    throw new Error(
-        "Roblox API failed after retries."
-    );
+
+    return {
+
+        username: username,
+
+        available: false,
+
+        error:
+            "Maximum retries reached."
+
+    };
 
 }
 
 
-/* =========================================
-   BATCH CHECK
-========================================= */
+/* =========================================================
+   CONCURRENT BATCH PROCESSOR
+========================================================= */
+
+async function checkBatch(usernames) {
+
+    const results =
+        new Array(
+            usernames.length
+        );
+
+    let nextIndex = 0;
+
+
+    async function worker() {
+
+        while (true) {
+
+            const index =
+                nextIndex++;
+
+            if (
+                index >=
+                usernames.length
+            ) {
+
+                return;
+
+            }
+
+
+            const username =
+                usernames[index];
+
+
+            results[index] =
+                await checkUsername(
+                    username
+                );
+
+        }
+
+    }
+
+
+    const workers = [];
+
+
+    for (
+        let i = 0;
+        i < CONCURRENCY;
+        i++
+    ) {
+
+        workers.push(
+            worker()
+        );
+
+    }
+
+
+    await Promise.all(
+        workers
+    );
+
+
+    return results;
+
+}
+
+
+/* =========================================================
+   BATCH ENDPOINT
+========================================================= */
 
 app.post(
     "/check-batch",
@@ -307,12 +437,14 @@ app.post(
                 req.body?.usernames;
 
 
-            /* =================================
-               VALIDATE
-            ================================= */
+            /* =============================================
+               VALIDATE ARRAY
+            ============================================= */
 
             if (
-                !Array.isArray(usernames)
+                !Array.isArray(
+                    usernames
+                )
             ) {
 
                 return res.status(400).json({
@@ -327,19 +459,21 @@ app.post(
             }
 
 
-            /* =================================
-               CLEAN
-            ================================= */
+            /* =============================================
+               CLEAN USERNAMES
+            ============================================= */
 
             usernames =
                 [
                     ...new Set(
 
                         usernames
+
                             .map(
                                 name =>
-                                    String(name)
-                                        .trim()
+                                    String(
+                                        name
+                                    ).trim()
                             )
 
                             .filter(
@@ -373,75 +507,23 @@ app.post(
 
 
             console.log(
-                `Checking ${usernames.length} usernames...`
+                `Checking ${usernames.length} usernames with ${CONCURRENCY} workers...`
             );
 
 
-            /* =================================
-               CHECK ROBLOX
-            ================================= */
+            /* =============================================
+               CHECK USERNAMES
+            ============================================= */
 
-            const data =
-                await checkRoblox(
+            const results =
+                await checkBatch(
                     usernames
                 );
 
 
-            /* =================================
-               EXISTING USERS
-            ================================= */
-
-            const existing =
-                new Set();
-
-
-            if (
-                Array.isArray(data.data)
-            ) {
-
-                for (
-                    const user
-                    of data.data
-                ) {
-
-                    if (user.name) {
-
-                        existing.add(
-                            user.name
-                                .toLowerCase()
-                        );
-
-                    }
-
-                }
-
-            }
-
-
-            /* =================================
-               CREATE RESULTS
-            ================================= */
-
-            const results =
-                usernames.map(
-                    username => ({
-
-                        username:
-                            username,
-
-                        available:
-                            !existing.has(
-                                username
-                                    .toLowerCase()
-                            )
-
-                    })
-                );
-
-
-            /* =================================
-               RESPONSE
-            ================================= */
+            /* =============================================
+               SEND RESULTS
+            ============================================= */
 
             return res.json({
 
@@ -460,13 +542,14 @@ app.post(
                 error
             );
 
-            return res.status(502).json({
+
+            return res.status(500).json({
 
                 success: false,
 
                 error:
                     error.message ||
-                    "Roblox API request failed."
+                    "Batch request failed."
 
             });
 
@@ -476,9 +559,9 @@ app.post(
 );
 
 
-/* =========================================
+/* =========================================================
    START SERVER
-========================================= */
+========================================================= */
 
 app.listen(
     PORT,
@@ -486,7 +569,34 @@ app.listen(
     () => {
 
         console.log(
-            `Username backend running on port ${PORT}`
+            "======================================"
+        );
+
+        console.log(
+            "ROBLOX USERNAME SCANNER BACKEND"
+        );
+
+        console.log(
+            "======================================"
+        );
+
+        console.log(
+            "Port:",
+            PORT
+        );
+
+        console.log(
+            "Concurrency:",
+            CONCURRENCY
+        );
+
+        console.log(
+            "Max batch:",
+            MAX_BATCH
+        );
+
+        console.log(
+            "======================================"
         );
 
     }
